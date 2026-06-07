@@ -35,10 +35,15 @@ quarkus:
     password: "${DB_PASSWORD:Aaa!89nky78D}"
     reactive:
       url: oracle:thin:@aaa-dev.cn8eyeqma3tp.ap-southeast-2.rds.amazonaws.com:1521/ORCL
-      # Reactive connection pool configuration
-      initial-size: 10
-      max-size: 30
-      acquisition-timeout: 10s
+      # Reactive connection pool configuration.
+      # Per-pod target ~286 TPS (2000 TPS / 7 pods). With the L1/L2 caches absorbing
+      # the vast majority of reads, steady-state DB concurrency is single digits
+      # (Little's law: 286 TPS x ~20ms = ~6 in-flight). 16 connections leaves burst
+      # headroom while keeping total Oracle sessions bounded (7 pods x 16 = 112).
+      initial-size: 4
+      max-size: 16
+      # Fail fast instead of blocking up to 10s waiting for a free connection.
+      acquisition-timeout: 200ms
       idle-timeout: 30s
       max-lifetime: PT30M
   # Increase event loop timeout for first request
@@ -105,9 +110,9 @@ quarkus:
     master-name: "${REDIS_MASTER_NAME}"
     role: "${REDIS_ROLE}"
     password: "${REDIS_PASSWORD}"
-    max-pool-size: 48               # Right-sized for concurrency 16: max ~32 concurrent Redis ops + headroom
-    max-waiting-handlers: 500      # Reduced - backpressure prevents unbounded waiting
-    max-pool-waiting: 256
+    max-pool-size: 32               # ~286 TPS/pod x a few ms Redis RTT => low single-digit concurrency; 32 is ample
+    max-waiting-handlers: 256      # Reduced - backpressure prevents unbounded waiting
+    max-pool-waiting: 128
     pool-recycle-timeout: 240000
     reconnect-attempts: 3
     reconnect-interval: 500
@@ -142,16 +147,23 @@ radius:
   accept:
     attributes: SESSION_TIMEOUT,IDLE_TIMEOUT
 
+# Hot-path DB query budget. Balanced fail-fast: a query that cannot complete in
+# 50ms is abandoned so the worker thread is freed rather than dragging the request
+# into the seconds range. 98% of requests are served from cache and never reach here.
+db:
+  query:
+    timeout: 50
+
 pool:
-  max-size: 30
-  connection-timeout: 5000
+  max-size: 16                     # Matches datasource max-size; sized for ~286 TPS/pod
+  connection-timeout: 200          # Fail fast on pool acquisition instead of 5s
   idle-timeout: 600000
   max-lifetime: 1800000
-  acquire-increment: 8
+  acquire-increment: 4
   prepared-statement-cache-max-size: 512
   pipelining-enabled: true
   pipelining-limit: 32              # Keep LOW for Oracle
-  event-loop-size: 16
+  event-loop-size: 2               # 1-core pod => 2 Vert.x event loops; matches quarkus.vertx.event-loops-pool-size
   tcp-keep-alive: true
   tcp-no-delay: true
   pool-cleaner-enabled: true

@@ -60,12 +60,8 @@ public class CacheClient {
         this.sessionExpiryIndex = sessionExpiryIndex;
         this.exceptionMetricsService = exceptionMetricsService;
     }
-    @Retry(
-            maxRetries = 1,
-            delay = 100,
-            jitter = 50
-    )
-    @Timeout(value = 3, unit = ChronoUnit.SECONDS)                  // Reduced from 8s - free worker threads faster on Redis slowdowns
+    // Hot-path read: fail fast (50ms), no retry. See getUserData rationale above.
+    @Timeout(value = 50)
     public Uni<String> getGroupId(String userId) {
 
         LoggingUtil.logDebug(log, M_GET, "Retrieving Group id for cache userId: %s", userId);
@@ -167,12 +163,10 @@ public class CacheClient {
     /**
      * Retrieve user data from Redis.
      */
-    @Retry(
-            maxRetries = 1,
-            delay = 100,
-            jitter = 50
-    )
-    @Timeout(value = 3, unit = ChronoUnit.SECONDS)                  // Reduced from 8s - free worker threads faster on Redis slowdowns
+    // Hot-path read: fail fast (50ms) and no retry so a Redis blip cannot push the
+    // request past the 20ms ceiling. On timeout the caller recovers with basic
+    // bucket selection (see getBalanceWithConsumptionCheck onFailure recoverWithItem).
+    @Timeout(value = 50)
     public Uni<UserSessionData> getUserData(String userId) {
         final long startTime = log.isDebugEnabled() ? System.currentTimeMillis() : 0;
         LoggingUtil.logDebug(log, M_GET, "getUserData","Retrieving user data for cache userId: %s", userId);

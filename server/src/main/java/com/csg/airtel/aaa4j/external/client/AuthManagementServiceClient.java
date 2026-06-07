@@ -33,11 +33,15 @@ public class AuthManagementServiceClient {
     private static final String CLASS_NAME = "AuthManagementServiceClient";
 
     /**
-     * Timeout in seconds for blocking on the HTTP response.
-     * blocking on future.get() can exhaust all worker threads if the
-     * downstream auth service is slow.
+     * Fail-fast timeout (ms) for blocking on the HTTP response.
+     * Blocking on future.get() ties up a worker thread for the whole round trip,
+     * so this must stay small to keep throughput high under load. It is set just
+     * above the auth service's own internal budget (~100ms) so that, on a slow
+     * downstream, the server receives the auth service's fast fallback response
+     * instead of tripping its own timeout. At ~286 TPS/pod the worst-case number
+     * of simultaneously blocked threads is ~286 x 0.15s ~= 43.
      */
-    private static final long RESPONSE_TIMEOUT_SECONDS = 5;
+    private static final long RESPONSE_TIMEOUT_MS = 150;
     private final ExternalApiMetricsService externalMetrics;
 
     @Inject
@@ -73,7 +77,7 @@ public class AuthManagementServiceClient {
                 .putHeader(AuthServiceConstants.HEADER_TRACE_ID, traceId)
                 .putHeader(AuthServiceConstants.HEADER_USER_NAME, username)
                 .putHeader("Content-Type", "application/json")
-                .timeout(RESPONSE_TIMEOUT_SECONDS * 1000)
+                .timeout(RESPONSE_TIMEOUT_MS)
                 .sendJsonObject(body, ar -> {
                     if (ar.succeeded()) {
                         HttpResponse<Buffer> response = ar.result();
@@ -93,15 +97,15 @@ public class AuthManagementServiceClient {
         String exception = "none";
 
         try {
-            result = future.get(RESPONSE_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            result = future.get(RESPONSE_TIMEOUT_MS, TimeUnit.MILLISECONDS);
             return result;
         } catch (TimeoutException e) {
             outcome = "failure";
             exception = "TimeoutException";
             statusCodeHolder[0] = -1;
             LoggingUtil.logError(logger, CLASS_NAME, AUTHENTICATE, null,
-                    "Authentication request timed out after %d seconds for user: %s",
-                    RESPONSE_TIMEOUT_SECONDS, username);
+                    "Authentication request timed out after %d ms for user: %s",
+                    RESPONSE_TIMEOUT_MS, username);
             future.cancel(true);
             return null;
         } catch (ExecutionException e) {
