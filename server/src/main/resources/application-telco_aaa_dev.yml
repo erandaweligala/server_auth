@@ -1,0 +1,119 @@
+config_ordinal: 500
+quarkus:
+  http:
+    http2: true
+    port: 8080
+    idle-timeout: 30s
+    read-timeout: 30s
+  log:
+    level: INFO
+    console:
+      format: "%d{yyyy-MM-dd HH:mm:ss,SSS} %-5p [%c{3.}] (%t) %s%e%n"
+  console:
+    color: true
+
+  otel:
+    traces:
+      exporter: none
+
+  vertx:
+    # Right-sized for 750m CPU per pod. event-loops ~2x cores.
+    event-loops-pool-size: 2
+    internal-blocking-pool-size: 30
+    warning-exception-time: 10s
+    max-event-loop-execute-time: 5s
+    max-worker-execute-time: 60s
+    prefer-native-transport: true
+    caching: false
+
+radius:
+  # Authentication Server
+  auth:
+    enabled: true
+    port: 1812
+    bind-address: 0.0.0.0
+
+  # Accounting Server
+  accounting:
+    enabled: true
+    port: 1813
+    bind-address: 0.0.0.0
+
+  # Shared Configuration
+  shared-secret: "${AUTH_ACC_SECRET}"
+  fail-on-startup-error: true
+
+
+
+  # # Shared Configuration
+  # shared-secret: sharedsecret
+  # fail-on-startup-error: true
+
+
+client:
+  coa-port: 3799
+  address: airtel-aaa-radius-client-service.airtel-aaa.svc.cluster.local
+  shared-secret: "${COA_SECRET}"
+
+
+
+
+auth:
+  service:
+    url: http://airtel-aaa-auth-management-service-service.airtel-aaa.svc.cluster.local.:8083/api/users/authenticate
+
+# WebClient pool tuned for K8s L4 load balancing.
+# More connections with fewer streams per connection ensures each connection
+# gets routed to a different pod by kube-proxy, achieving even distribution.
+webclient:
+  max-pool-size: 100
+  connect-timeout: 3000
+  idle-timeout: 30000
+  keep-alive: true
+  pipelining: true
+  pipelining-limit: 10
+  http2-max-pool-size: 100
+  http2-multiplexing-limit: 10
+  http2-keep-alive-timeout: 30
+
+kafka:
+  bootstrap:
+    servers: kafka-headless.cluster-dc.svc.cluster.local:9092
+
+
+# ===== KAFKA CONFIGURATION FOR 1000 TPS =====
+mp:
+  messaging:
+    outgoing:
+      accounting-events:
+        connector: smallrye-kafka
+        topic: accounting-dc
+        value.serializer: io.quarkus.kafka.client.serialization.ObjectMapperSerializer
+        key.serializer: org.apache.kafka.common.serialization.StringSerializer
+        acks: all
+        retries: 2147483647
+        enable.idempotence: true
+        max.in.flight.requests.per.connection: 100
+        compression.type: snappy
+        batch.size: 65536
+        linger.ms: 25
+        buffer.memory: 67108864
+        request.timeout.ms: 30000
+        delivery.timeout.ms: 120000
+
+    incoming:
+      accounting-resp-events:
+        connector: smallrye-kafka
+        topic: accounting-response-dc
+        group.id: accounting-consumer-group
+        value.deserializer: io.quarkus.kafka.client.serialization.ObjectMapperDeserializer
+        key.deserializer: org.apache.kafka.common.serialization.StringDeserializer
+        auto.offset.reset: earliest
+        enable.auto.commit: true
+        max.poll.records: 500
+        max.poll.interval.ms: 300000
+        session.timeout.ms: 10000
+        fetch.min.bytes: 1024
+        fetch.max.wait.ms: 500
+        failure-strategy: ignore
+

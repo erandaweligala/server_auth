@@ -1,0 +1,142 @@
+quarkus:
+  micrometer:
+    enabled: true
+    binder-enabled-default: false
+    binder:
+      jvm:
+        enabled: true
+      system:
+        enabled: true
+      http-server:
+        enabled: true
+      vertx:
+        enabled: true
+
+
+    export:
+      prometheus:
+        enabled: true
+        path: /q/metrics
+    vertx:
+      enabled: true
+      metrics:
+        options:
+          enabled: true
+          registry-name: micrometer
+
+  # Enable HTTP/2 for better multiplexing
+  http:
+    http2: true
+    host: 0.0.0.0
+    port: 8083
+  # ===== DATABASE CONNECTION POOL =====
+  datasource:
+    db-kind: oracle
+    username: CYA_AAA_OPS
+    password: UkkaNk8KnAPp19!
+    #    username: aaa
+    #    password: Aaa!89nky78D
+    reactive:
+      url: oracle:thin:@172.24.0.203:1908/AAA
+      #      url: oracle:thin:@aaa-dev.cn8eyeqma3tp.ap-southeast-2.rds.amazonaws.com:1521/ORCL
+      #       Reactive connection pool configuration
+      initial-size: 10
+      max-size: 50
+      acquisition-timeout: 10s
+      idle-timeout: 30s
+      max-lifetime: PT30M
+  # Increase event loop timeout for first request
+  # Vertx Configuration - HIGH TPS OPTIMIZED for 2500 TPS
+  vertx:
+    event-loops-pool-size: 32
+    worker-pool-size: 64
+    internal-blocking-pool-size: 100
+    warning-exception-time: 10s
+    max-event-loop-execute-time: 5s
+    max-worker-execute-time: 60s
+    prefer-native-transport: true
+    caching: false
+
+  log:
+    level: DEBUG
+    console:
+      enable: true
+      color: true
+      format: "%d{yyyy-MM-dd HH:mm:ss,SSS} %-5p [%c{3.}] (%t) %s%e%n"
+
+    file:
+      enable: true
+      path: /var/log/dte/auth-mgt.log
+      format: "%d{yyyy-MM-dd HH:mm:ss,SSS} %-5p [%c{3.}] (%t) %s%e%n"
+      rotation:
+        max-file-size: 100M
+        max-backup-index: 10
+        rotate-on-boot: true
+
+  thread-pool:
+    core-threads: 100
+    max-threads: 500
+    queue-size: 5000
+    growth-resistance: 0
+    shutdown-timeout: 30s
+
+
+  banner:
+    enabled: false
+
+  redis:
+    client-type: sentinel
+    hosts: redis://redis-cluster-headless.csg-aaa-query-cache.svc.cluster.local:26379
+    master-name: mymaster
+    role: master
+    password: S3cure_Redis_Pass_w0rd!
+    max-pool-size: 300
+    max-waiting-handlers: 5000
+    max-pool-waiting: 800
+    pool-recycle-timeout: 240000
+    reconnect-attempts: 3
+    reconnect-interval: 500
+    pool-cleaner-interval: 20000
+    timeout: 60000
+
+  #  redis:
+  #    hosts: redis://redis.redis.svc.cluster.local:6379
+  #    timeout: 10s
+  #    max-pool-size: 20
+  #    max-pool-waiting: 24
+  #    devservices:
+  #      enabled: false
+
+  devservices:
+    enabled: false
+
+auth:
+  algorithm:
+    method: AES
+  AES:
+    secret:
+      key:
+        value: "Your16CharKey123"
+  isCheckBucket: true
+
+radius:
+  accept:
+    attributes: SESSION_TIMEOUT,IDLE_TIMEOUT
+
+pool:
+  max-size: 32                      # Max connections
+  connection-timeout: 5000          # 5 seconds to acquire connection
+  idle-timeout: 600000              # 10 minutes idle before closing
+  max-lifetime: 1800000             # 30 minutes max connection lifetime
+  acquire-increment: 4              # Connections to acquire at once
+  prepared-statement-cache-max-size: 256  # Cache prepared statements
+  pipelining-enabled: true          # Enable query pipelining
+  pipelining-limit: 64             # Max pipelined queries
+  event-loop-size: 32               # Match vertx event-loops-pool-size
+  tcp-keep-alive: true              # Detect dead connections
+  tcp-no-delay: true                # Reduce latency
+  pool-cleaner-enabled: true        # Clean idle connections
+  pool-cleaner-interval: 60000      # Clean every minute
+
+cache-update:
+  scheduler-interval: 1440m # Run every 24 hrs

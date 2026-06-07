@@ -1,0 +1,79 @@
+package com.csg.airtel.aaa4j.application.config;
+
+import com.csg.airtel.aaa4j.common.util.LoggingUtil;
+import io.quarkus.reactive.oracle.client.OraclePoolCreator;
+import io.vertx.oracleclient.OracleBuilder;
+import io.vertx.oracleclient.OracleConnectOptions;
+import io.vertx.sqlclient.Pool;
+import io.vertx.sqlclient.PoolOptions;
+import jakarta.enterprise.inject.Produces;
+import jakarta.inject.Inject;
+import jakarta.inject.Singleton;
+import org.jboss.logging.Logger;
+
+import java.util.concurrent.TimeUnit;
+
+/**
+ * Customizes the Oracle connection
+ * Applies configuration from PoolConfig to tune pool behavior.
+ */
+@Singleton
+public class OraclePoolCustomizer implements OraclePoolCreator {
+
+    private static final Logger LOG = Logger.getLogger(OraclePoolCustomizer.class);
+    private static final String CLASS_NAME = "OraclePoolCustomizer";
+
+    private final PoolConfig poolConfig;
+
+    @Inject
+    public OraclePoolCustomizer(PoolConfig poolConfig) {
+        this.poolConfig = poolConfig;
+    }
+
+    @Override
+    public Pool create(Input input) {
+        OracleConnectOptions connectOptions = input.oracleConnectOptions();
+
+        PoolOptions poolOptions = new PoolOptions()
+                .setMaxSize(poolConfig.maxSize())
+                .setIdleTimeout(poolConfig.idleTimeout())
+                .setIdleTimeoutUnit(TimeUnit.MILLISECONDS)
+                .setMaxLifetime(poolConfig.maxLifetime())
+                .setMaxLifetimeUnit(TimeUnit.MILLISECONDS)
+                .setConnectionTimeout(poolConfig.connectionTimeout())
+                .setConnectionTimeoutUnit(TimeUnit.MILLISECONDS)
+                .setPoolCleanerPeriod(poolConfig.poolCleanerInterval())
+                .setEventLoopSize(poolConfig.eventLoopSize())
+                .setShared(true)
+                .setName("oracle-pool-1000tps");
+
+        connectOptions
+                .setTcpKeepAlive(poolConfig.tcpKeepAlive())
+                .setTcpNoDelay(poolConfig.tcpNoDelay());
+
+        LoggingUtil.logInfo(LOG, CLASS_NAME, "create",
+                "Oracle pool '%s' configured: maxSize=%d, connectionTimeout=%dms, idleTimeout=%dms, " +
+                        "maxLifetime=%dms, eventLoopSize=%d, pipelining=%s, tcpKeepAlive=%s, tcpNoDelay=%s",
+                poolOptions.getName(),
+                poolConfig.maxSize(),
+                poolConfig.connectionTimeout(),
+                poolConfig.idleTimeout(),
+                poolConfig.maxLifetime(),
+                poolConfig.eventLoopSize(),
+                poolConfig.pipeliningEnabled(),
+                poolConfig.tcpKeepAlive(),
+                poolConfig.tcpNoDelay());
+
+        return OracleBuilder.pool()
+                .with(poolOptions)
+                .connectingTo(connectOptions)
+                .using(input.vertx())
+                .build();
+    }
+
+    @Produces
+    @Singleton
+    io.vertx.mutiny.sqlclient.Pool mutinyPool(io.vertx.mutiny.oracleclient.OraclePool oraclePool) {
+        return oraclePool;  // OraclePool extends Pool, safe upcast
+    }
+}
