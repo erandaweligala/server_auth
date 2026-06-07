@@ -21,7 +21,6 @@ import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.eclipse.microprofile.faulttolerance.CircuitBreaker;
-import org.eclipse.microprofile.faulttolerance.Retry;
 import org.jboss.logging.Logger;
 
 import java.time.Duration;
@@ -58,12 +57,8 @@ public class UserAuthenticationRepository {
             successThreshold = 2,
             skipOn = {BusinessValidationException.class}
     )
-    @Retry(
-            maxRetries = 2,
-            delay = 100,
-            maxDuration = 10000,
-            abortOn = {BusinessValidationException.class}
-    )
+    // No @Retry on the hot path: a retry blows the 20ms ceiling. The Vert.x
+    // ifNoItem().after(queryTimeoutMs=50ms) below provides fail-fast instead.
     public Uni<AuthenticationDbDetails> getDbDetails(String userName, List<String> valuePaths) {
         long startTime = System.currentTimeMillis();
 
@@ -82,10 +77,12 @@ public class UserAuthenticationRepository {
                 .fail()
                 .onItem().invoke(rows -> {
                     long duration = System.currentTimeMillis() - startTime;
-                    LoggingUtil.logInfo(LOG, CLASS_NAME, "getDbDetails",
+                    LoggingUtil.logDebug(LOG, CLASS_NAME, "getDbDetails",
                             "Query completed username=%s rowCount=%d [%d ms]",
                             userName, rows.size(), duration);
-                    if (duration > 2000) {
+                    // With a 50ms fail-fast budget, anything over half the budget is
+                    // worth surfacing as a slow-query signal.
+                    if (duration > 25) {
                         LoggingUtil.logWarn(LOG, CLASS_NAME, "getDbDetails",
                                 "SLOW QUERY username=%s [%d ms]", userName, duration);
                     }
@@ -230,16 +227,25 @@ public class UserAuthenticationRepository {
         Map<String, String> attributesMap = new HashMap<>();
         List<BucketDetails> bucketDetailsList = new ArrayList<>();
 
+        // Column ordering is identical for every row in the result set, so build the
+        // name -> index map once (from the first row) rather than once per row,
+        // which was O(rows x cols).
+        boolean needAttributes = valuePaths != null && !valuePaths.isEmpty();
+        Map<String, Integer> columnIndexMap = Collections.emptyMap();
+
         int rowCount = 0;
         while (it.hasNext()) {
             Row row = it.next();
             rowCount++;
+            if (needAttributes && columnIndexMap.isEmpty()) {
+                columnIndexMap = buildColumnIndexMap(row);
+            }
             extractUserDataOnce(details, row);
             BucketDetails bucket = extractBucketDetails(row);
             if (bucket.getBucketId() != null) {
                 bucketDetailsList.add(bucket);
             }
-            extractVendorAttributes(valuePaths, attributesMap, row);
+            extractVendorAttributes(valuePaths, attributesMap, row, columnIndexMap);
         }
 
         details.setAttributes(attributesMap);
@@ -276,15 +282,20 @@ public class UserAuthenticationRepository {
         );
     }
 
+    private Map<String, Integer> buildColumnIndexMap(Row row) {
+        int columns = row.size();
+        Map<String, Integer> map = HashMap.newHashMap(columns);
+        for (int i = 0; i < columns; i++) {
+            map.put(row.getColumnName(i), i);
+        }
+        return map;
+    }
+
     private void extractVendorAttributes(List<String> valuePaths,
                                          Map<String, String> attributesMap,
-                                         Row row) {
+                                         Row row,
+                                         Map<String, Integer> columnIndexMap) {
         if (valuePaths == null || valuePaths.isEmpty()) return;
-
-        Map<String, Integer> columnIndexMap = new HashMap<>();
-        for (int i = 0; i < row.size(); i++) {
-            columnIndexMap.put(row.getColumnName(i), i);
-        }
 
         for (String valuePath : valuePaths) {
             if (valuePath == null || valuePath.trim().isEmpty()) continue;

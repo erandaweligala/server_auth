@@ -13,7 +13,6 @@ import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import org.eclipse.microprofile.faulttolerance.CircuitBreaker;
 import org.eclipse.microprofile.faulttolerance.Fallback;
-import org.eclipse.microprofile.faulttolerance.Retry;
 import org.eclipse.microprofile.faulttolerance.Timeout;
 import org.jboss.logging.Logger;
 
@@ -52,8 +51,9 @@ public class UserAuthenticationController {
             delay = 5000,                 // Wait 5s before half-open state
             successThreshold = 2          // Need 2 successes to close
     )
-    @Retry(maxRetries = 2, delay = 200)  // Retry twice quickly on failure
-    @Timeout(3000)                       // Timeout after 3s
+    // No @Retry on the hot path: a single retry (200ms delay) alone exceeds the
+    // 20ms ceiling and ties up the request. Slow calls fail fast into the fallback.
+    @Timeout(100)                        // Fail fast: DB(50) + Redis(50) budget + margin
     @Fallback(fallbackMethod = "fallbackAuthenticate")
     public Uni<Response> authenticate(AuthenticationRequest request) {
         LoggingUtil.logInfo(LOG, CLASS_NAME, "authenticate",

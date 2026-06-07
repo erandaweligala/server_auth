@@ -72,7 +72,9 @@ public class RadiusAuthenticationHandler implements RadiusServer.Handler {
         MDC.put(AuthServiceConstants.TRACE_ID, traceId);
 
         Instant startTime = Instant.now();
-        LoggingUtil.logInfo(logger, CLASS_NAME, HANDLE_PACKET,
+        // Per-request timing is exported via Micrometer histograms (@TimedRequest);
+        // keep the log line at DEBUG to avoid formatting cost on the hot path.
+        LoggingUtil.logDebug(logger, CLASS_NAME, HANDLE_PACKET,
                 "[RADIUS_TIMING] [AUTHENTICATION] Request started at: %s", startTime);
         Packet resultPacket = null;
         try {
@@ -123,7 +125,7 @@ public class RadiusAuthenticationHandler implements RadiusServer.Handler {
             long durationMs = Duration.between(startTime, endTime).toMillis();
             String authResult = resolveAuthResult(resultPacket);
 
-            LoggingUtil.logInfo(logger, CLASS_NAME, HANDLE_PACKET,
+            LoggingUtil.logDebug(logger, CLASS_NAME, HANDLE_PACKET,
                     "[RADIUS_TIMING] [AUTHENTICATION] Request ended at: %s | Duration: %d ms | Result: %s",
                     endTime, durationMs, authResult);
 

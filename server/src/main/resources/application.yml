@@ -51,28 +51,30 @@ quarkus:
       exporter: none
 
   vertx:
-    event-loops-pool-size: 2
+    event-loops-pool-size: 2         # 1-core pod => 2 event loops
     max-worker-execute-time: 60s
-    internal-blocking-pool-size: 30
+    # The RADIUS handler blocks on the auth HTTP call. With a fail-fast 150ms client
+    # timeout and ~286 TPS/pod, worst-case in-flight blocked calls ~= 286 x 0.15 = ~43.
+    internal-blocking-pool-size: 48
     warning-exception-time: 10s
     max-event-loop-execute-time: 5s
     prefer-native-transport: true
 
   thread-pool:
-    max-threads: 80
-    queue-size: 2000
-    core-threads: 20
+    max-threads: 48                  # Sized to the blocked-call concurrency above
+    queue-size: 256                  # Shed load fast; a 2000-deep queue just converts overload into multi-second latency
+    core-threads: 16
 
 
 # WebClient pool tuned for K8s L4 load balancing.
 # More connections with fewer streams per connection ensures each connection
 # gets routed to a different pod by kube-proxy, achieving even distribution.
 webclient:
-  connect-timeout: 3000
+  connect-timeout: 3000            # One-time connection establishment; pool is kept warm
   idle-timeout: 30000
   keep-alive: true
-  http2-max-pool-size: 100
-  http2-multiplexing-limit: 10
+  http2-max-pool-size: 32          # 32 conns x 20 streams = 640 concurrent capacity; far above ~286 TPS/pod need
+  http2-multiplexing-limit: 20
   http2-keep-alive-timeout: 30
 #webclient:
 #  max-pool-size: 100

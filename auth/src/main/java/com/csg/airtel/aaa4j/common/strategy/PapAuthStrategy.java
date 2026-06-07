@@ -17,6 +17,16 @@ public class PapAuthStrategy implements AuthenticationStrategy {
     private static final Logger LOG = Logger.getLogger(PapAuthStrategy.class);
     private static final String CLASS_NAME = "PapAuthStrategy";
 
+    // MessageDigest is not thread-safe; keep one per thread. digest() auto-resets,
+    // and we reset() defensively before use, so reuse avoids a JCA lookup per request.
+    private static final ThreadLocal<MessageDigest> MD5 = ThreadLocal.withInitial(() -> {
+        try {
+            return MessageDigest.getInstance("MD5");
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("MD5 algorithm not available", e);
+        }
+    });
+
     private final EncryptionService encryptionService;
 
     @ConfigProperty(name = "auth.algorithm.method")
@@ -51,20 +61,16 @@ public class PapAuthStrategy implements AuthenticationStrategy {
     }
 
     private String hashMD5(String input) {
-        try {
-            MessageDigest md = MessageDigest.getInstance("MD5");
-            byte[] messageDigest = md.digest(input.getBytes());
-            StringBuilder hexString = new StringBuilder();
-            for (byte b : messageDigest) {
-                String hex = Integer.toHexString(0xff & b);
-                if (hex.length() == 1) hexString.append('0');
-                hexString.append(hex);
-            }
-            return hexString.toString();
-        } catch (NoSuchAlgorithmException e) {
-            LoggingUtil.logError(LOG, CLASS_NAME, "authenticate",e,"MD5 algorithm not found");
-            return null;
+        MessageDigest md = MD5.get();
+        md.reset();
+        byte[] messageDigest = md.digest(input.getBytes());
+        StringBuilder hexString = new StringBuilder();
+        for (byte b : messageDigest) {
+            String hex = Integer.toHexString(0xff & b);
+            if (hex.length() == 1) hexString.append('0');
+            hexString.append(hex);
         }
+        return hexString.toString();
     }
 }
 
