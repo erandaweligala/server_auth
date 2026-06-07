@@ -5,11 +5,10 @@ import com.csg.airtel.aaa4j.common.util.LoggingUtil;
 import com.csg.airtel.aaa4j.domain.constant.ResponseCodeEnum;
 import com.csg.airtel.aaa4j.domain.model.AuthenticationDbDetails;
 import com.csg.airtel.aaa4j.domain.model.BucketDetails;
+import com.csg.airtel.aaa4j.domain.service.ExceptionMetricsService;
 import com.csg.airtel.aaa4j.exception.BaseException;
 import com.csg.airtel.aaa4j.exception.BusinessValidationException;
 import com.csg.airtel.aaa4j.metrics.db.TimedDb;
-import com.csg.airtel.aaa4j.metrics.service.RootCauseMetricsService;      // NEW
-import com.csg.airtel.aaa4j.metrics.tracker.RootCauseExceptionTracker;     // NEW
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.smallrye.mutiny.Uni;
@@ -37,19 +36,16 @@ public class UserAuthenticationRepository {
     private static final String CLASS_NAME = "UserAuthenticationRepository";
 
     private final Pool client;
-    private final RootCauseMetricsService exceptionMetrics;    // NEW
-    private final RootCauseExceptionTracker exceptionTracker;  // NEW — @RequestScoped, one per HTTP request
+    private final ExceptionMetricsService exceptionMetrics;
     private final AtomicLong lastAuthDbExecutionTimeMs = new AtomicLong(0);
     @ConfigProperty(name = "db.query.timeout", defaultValue = "5000")
     int queryTimeoutMs;
 
     @Inject
     public UserAuthenticationRepository(Pool client,
-                                        RootCauseMetricsService exceptionMetrics,
-                                        RootCauseExceptionTracker exceptionTracker, MeterRegistry meterRegistry) {
+                                        ExceptionMetricsService exceptionMetrics, MeterRegistry meterRegistry) {
         this.client = client;
         this.exceptionMetrics = exceptionMetrics;
-        this.exceptionTracker = exceptionTracker;
         Gauge.builder("radius.auth.db.execution.time.ms", lastAuthDbExecutionTimeMs, AtomicLong::get)
                 .description("Duration in milliseconds of the most recently completed auth db execution")
                 .register(meterRegistry);
@@ -100,7 +96,7 @@ public class UserAuthenticationRepository {
                     lastAuthDbExecutionTimeMs.set(duration);
                     LoggingUtil.logError(LOG, CLASS_NAME, "getDbDetails", null,
                             "Query failed username=%s [%d ms]", userName, duration);
-                    exceptionMetrics.record(exceptionTracker, e, CLASS_NAME, "getDbDetails");
+                    exceptionMetrics.recordException(e, ExceptionMetricsService.Layer.RESOURCE, ExceptionMetricsService.Source.INTERNAL);
                 })
                 .onFailure().transform(this::mapToDatabaseException);
     }
@@ -119,7 +115,8 @@ public class UserAuthenticationRepository {
     s.SERVICE_START_DATE,
     b.TIME_WINDOW,
     s.STATUS AS SERVICE_STATUS,
-    b.IS_UNLIMITED
+    b.IS_UNLIMITED,
+    b.EXPIRATION
     """;
 
         if (valuePaths == null || valuePaths.isEmpty()) {
@@ -274,7 +271,8 @@ public class UserAuthenticationRepository {
                 row.getLocalDateTime("SERVICE_START_DATE"),
                 row.getLocalDateTime("EXPIRY_DATE"),
                 row.getString("SERVICE_STATUS"),
-                row.getInteger("IS_UNLIMITED")
+                row.getInteger("IS_UNLIMITED"),
+                row.getLocalDateTime("EXPIRATION")
         );
     }
 

@@ -21,5 +21,6 @@ public class BucketDetails {
     private LocalDateTime serviceExpiry;
     private String serviceStatus;
     private int isUnlimited;
+    private LocalDateTime bucketExpiry;
 }
 

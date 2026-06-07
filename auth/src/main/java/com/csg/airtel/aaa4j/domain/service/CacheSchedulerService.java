@@ -7,8 +7,6 @@ import com.csg.airtel.aaa4j.domain.constant.ResponseCodeEnum;
 import com.csg.airtel.aaa4j.domain.model.VendorAttributeConfig;
 import com.csg.airtel.aaa4j.exception.BaseException;
 import com.csg.airtel.aaa4j.external.repository.BNGRepository;
-import com.csg.airtel.aaa4j.metrics.service.RootCauseMetricsService;
-import com.csg.airtel.aaa4j.metrics.tracker.RootCauseExceptionTracker;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.quarkus.redis.datasource.ReactiveRedisDataSource;
@@ -55,14 +53,12 @@ public class CacheSchedulerService {
     private static final String VENDOR_CONFIG_CACHE_KEY = "vendor_configs";
     private final Pool dbPool;
     private final PoolConfig poolConfig;
-    private final RootCauseMetricsService exceptionMetrics;
-    private final RootCauseExceptionTracker exceptionTracker;
+    private final ExceptionMetricsService exceptionMetrics;
 
     @Inject
     public CacheSchedulerService(BNGRepository bngRepository,
                                  ReactiveRedisDataSource redisDataSource,
-                                 ObjectMapper objectMapper, Pool dbPool, PoolConfig poolConfig, RootCauseMetricsService exceptionMetrics,
-                                 RootCauseExceptionTracker exceptionTracker) {
+                                 ObjectMapper objectMapper, Pool dbPool, PoolConfig poolConfig, ExceptionMetricsService exceptionMetrics) {
         this.bngRepository = bngRepository;
         this.stringRedisCommands = redisDataSource.value(String.class);
         this.listRedisCommands = redisDataSource.value(List.class);
@@ -70,7 +66,6 @@ public class CacheSchedulerService {
         this.dbPool = dbPool;
         this.poolConfig = poolConfig;
         this.exceptionMetrics = exceptionMetrics;
-        this.exceptionTracker = exceptionTracker;
     }
 
     void onStart(@Observes StartupEvent ev) {
@@ -137,7 +132,7 @@ public class CacheSchedulerService {
                 .onFailure().invoke(e -> {
                     LoggingUtil.logError(LOG, CLASS_NAME, "updateBarredPlanCache", e,
                             "Barred plan cache update failed - traceId: %s", traceId);
-                    exceptionMetrics.record(exceptionTracker, e, CLASS_NAME, "updateBarredPlanCache");
+                    exceptionMetrics.recordException(e, ExceptionMetricsService.Layer.RESOURCE, ExceptionMetricsService.Source.INTERNAL);
                 })
                 .onFailure().recoverWithNull()
                 .replaceWithVoid();
@@ -173,7 +168,7 @@ public class CacheSchedulerService {
                 .onFailure().invoke(e -> {
                     LoggingUtil.logError(LOG, CLASS_NAME, "updateNasIpsCache", e,
                             "NAS IPs cache update failed - traceId: %s", traceId);
-                    exceptionMetrics.record(exceptionTracker, e, CLASS_NAME, "updateNasIpsCache");
+                    exceptionMetrics.recordException(e, ExceptionMetricsService.Layer.RESOURCE, ExceptionMetricsService.Source.INTERNAL);
                 })
                 .onFailure().recoverWithNull()
                 .replaceWithVoid();
@@ -228,7 +223,7 @@ public class CacheSchedulerService {
                 .onFailure().invoke(e -> {
                     LoggingUtil.logError(LOG, CLASS_NAME, "updateVendorConfigCache", e,
                             "Vendor config cache update failed - traceId: %s", traceId);
-                    exceptionMetrics.record(exceptionTracker, e, CLASS_NAME, "updateVendorConfigCache");
+                    exceptionMetrics.recordException(e, ExceptionMetricsService.Layer.RESOURCE, ExceptionMetricsService.Source.INTERNAL);
                 })
                 .onFailure().recoverWithNull()
                 .replaceWithVoid();

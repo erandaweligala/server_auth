@@ -6,11 +6,11 @@ quarkus:
       jvm:
         enabled: true
       system:
-        enabled: true
+          enabled: true
       http-server:
-        enabled: true
+          enabled: true
       vertx:
-        enabled: true
+         enabled: true
 
 
     export:
@@ -31,11 +31,16 @@ quarkus:
   # ===== DATABASE CONNECTION POOL =====
   datasource:
     db-kind: oracle
-    username: aaa
-    password: Aaa!89nky78D
+    username: "${DB_USER:aaa}"
+    password: "${DB_PASSWORD:Aaa!89nky78D}"
     reactive:
-      #url: oracle:thin:@localhost:1521/FREEPDB1
-      url: oracle:thin:@localhost:1524/ORCL
+      url: oracle:thin:@aaa-dev.cn8eyeqma3tp.ap-southeast-2.rds.amazonaws.com:1521/ORCL
+      # Reactive connection pool configuration
+      initial-size: 10
+      max-size: 30
+      acquisition-timeout: 10s
+      idle-timeout: 30s
+      max-lifetime: PT30M
   # Increase event loop timeout for first request
 
   vertx:
@@ -95,27 +100,42 @@ quarkus:
   banner:
     enabled: false
   redis:
-    hosts: redis://localhost:6379
-    max-pool-size: 50                # 350 TPS/pod x 5ms = ~1.75 concurrent; 50 = safe headroom (150 created 1500 total across 10 pods)
-    max-waiting-handlers: 1000
-    max-pool-waiting: 500
+    client-type: sentinel
+    hosts: redis://redis-cluster-headless.cluster-redis.svc.cluster.local:26379
+    master-name: "${REDIS_MASTER_NAME}"
+    role: "${REDIS_ROLE}"
+    password: "${REDIS_PASSWORD}"
+    max-pool-size: 48               # Right-sized for concurrency 16: max ~32 concurrent Redis ops + headroom
+    max-waiting-handlers: 500      # Reduced - backpressure prevents unbounded waiting
+    max-pool-waiting: 256
     pool-recycle-timeout: 240000
     reconnect-attempts: 3
     reconnect-interval: 500
     pool-cleaner-interval: 20000
-    response-timeout: 3000
-    connection-timeout: 2000
+    timeout: 120000
+
+#    redis:
+#      hosts: redis://localhost:6379
+#      max-pool-size: 150               # Right-sized: 300 TPS x ~5ms = ~1.5 concurrent + headroom
+#      max-waiting-handlers: 3000
+#      max-pool-waiting: 1000
+#      pool-recycle-timeout: 240000
+#      reconnect-attempts: 3
+#      reconnect-interval: 500
+#      pool-cleaner-interval: 20000
+#      response-timeout: 3000
+#      connection-timeout: 2000
 
   devservices:
     enabled: false
 
 auth:
   algorithm:
-    method: AES
+    method: "${ENCRYPTION_TYPE}"
   AES:
     secret:
       key:
-        value: 12345678
+        value: "${ENCRYPTION_SECRET_KEY}"
   isCheckBucket: true
 
 radius:

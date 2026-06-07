@@ -65,9 +65,15 @@ public class UserAuthenticationController {
         return userAuthenticationService.userAuthenticate(request)
                 .onItem().transform(user -> {
                     long durationMs = (System.nanoTime() - startTime) / 1_000_000;
-                    LoggingUtil.logInfo(LOG, CLASS_NAME, "authenticate",
-                            "Authentication successful username=%s [%d ms]",
-                            request.getUsername(), durationMs);
+                    if (!user.getIsAuthorized() || !user.getIsActive()) {
+                        LoggingUtil.logInfo(LOG, CLASS_NAME, "authenticate",
+                                "Authentication rejected username=%s [%d ms]",
+                                request.getUsername(), durationMs);
+                    }else{
+                        LoggingUtil.logInfo(LOG, CLASS_NAME, "authenticate",
+                                "Authentication successful username=%s [%d ms]",
+                                request.getUsername(), durationMs);
+                    }
                     return Response.ok(user).build();
                 })
                 .onFailure(BaseException.class).recoverWithItem(e -> {
@@ -118,6 +124,7 @@ public class UserAuthenticationController {
      *
      * @param request the authentication request attempted
      * @return Uni<Response> containing a service unavailable response
+     *
      */
     public Uni<Response> fallbackAuthenticate(AuthenticationRequest request) {
         LoggingUtil.logWarn(LOG, CLASS_NAME, "fallbackAuthenticate",

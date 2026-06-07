@@ -3,11 +3,11 @@ package com.csg.airtel.aaa4j.external.client;
 import com.csg.airtel.aaa4j.common.util.LoggingUtil;
 import com.csg.airtel.aaa4j.domain.constant.ResponseCodeEnum;
 import com.csg.airtel.aaa4j.domain.model.session.UserSessionData;
+import com.csg.airtel.aaa4j.domain.service.ExceptionMetricsService;
 import com.csg.airtel.aaa4j.exception.BaseException;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import io.quarkus.redis.datasource.ReactiveRedisDataSource;
 import io.quarkus.redis.datasource.keys.ReactiveKeyCommands;
-import io.quarkus.redis.datasource.value.SetArgs;
+import io.quarkus.redis.datasource.value.ReactiveValueCommands;
 import io.smallrye.mutiny.Uni;
 import io.smallrye.mutiny.unchecked.Unchecked;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -18,156 +18,399 @@ import org.eclipse.microprofile.faulttolerance.Retry;
 import org.eclipse.microprofile.faulttolerance.Timeout;
 import org.jboss.logging.Logger;
 
-import java.time.Duration;
+import java.time.temporal.ChronoUnit;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
 
 
 @ApplicationScoped
 public class CacheClient {
 
     private static final Logger log = Logger.getLogger(CacheClient.class);
-    private static final String CLASS_NAME = "CacheClient";
+    private static final String M_GET = "getUserData";
+    private static final String M_STORE = "storeUserData";
+    private static final String M_UPDATE = "updateCache";
+    private static final String M_BATCH = "batchGet";
 
     final ReactiveRedisDataSource reactiveRedisDataSource;
-    final ObjectMapper objectMapper;
+    final SessionCacheCodec sessionCacheCodec;
     private static final String KEY_PREFIX = "user:";
+    private static final String GROUP_KEY_PREFIX = "group:";
+    private final ReactiveValueCommands<String, String> valueCommands;
+    private final ReactiveValueCommands<String, byte[]> userValueCommands;
+    private final SessionExpiryIndex sessionExpiryIndex;
+    private final ExceptionMetricsService exceptionMetricsService;
+
+
+    private final ReactiveKeyCommands<String> keyCommands;
 
     @Inject
-    public CacheClient(ReactiveRedisDataSource reactiveRedisDataSource, ObjectMapper objectMapper) {
+    public CacheClient(ReactiveRedisDataSource reactiveRedisDataSource,
+                       SessionCacheCodec sessionCacheCodec,
+                       SessionExpiryIndex sessionExpiryIndex,
+                       ExceptionMetricsService exceptionMetricsService) {
         this.reactiveRedisDataSource = reactiveRedisDataSource;
-        this.objectMapper = objectMapper;
-        LoggingUtil.logInfo(log, CLASS_NAME, "constructor",
-                "CacheClient initialized with key prefix: %s", KEY_PREFIX);
+        this.sessionCacheCodec = sessionCacheCodec;
+        this.valueCommands = reactiveRedisDataSource.value(String.class, String.class);
+        this.userValueCommands = reactiveRedisDataSource.value(String.class, byte[].class);
+        this.keyCommands = reactiveRedisDataSource.key();
+        this.sessionExpiryIndex = sessionExpiryIndex;
+        this.exceptionMetricsService = exceptionMetricsService;
     }
-
-    /**
-     * Store user data in Redis
-     */
-    public Uni<Void> storeUserData(String userId, UserSessionData userData) {
-        long startTime = System.currentTimeMillis();
-
-        LoggingUtil.logInfo(log, CLASS_NAME, "storeUserData",
-                "Storing user data in cache for userId: %s", userId);
-
-        String key = KEY_PREFIX + userId;
-        String jsonValue = serialize(userData);
-        Uni<Void> result = reactiveRedisDataSource.value(String.class)
-                .set(key, jsonValue);
-        LoggingUtil.logInfo(log, CLASS_NAME, "storeUserData","User data stored Complete for userId: %s in %d ms", userId, (System.currentTimeMillis() - startTime));
-        return result;
-    }
-
-    /**
-     * Retrieve user data from Redis
-     */
-    @CircuitBreaker(
-            requestVolumeThreshold = 10,
-            failureRatio = 0.5,
-            delay = 5000,
-            successThreshold = 2
-    )
     @Retry(
-            maxRetries = 2,
+            maxRetries = 1,
             delay = 100,
-            maxDuration = 5000
+            jitter = 50
     )
-    @Timeout(value = 5000)
-    public Uni<UserSessionData> getUserData(String userId) {
-        long startTime = System.currentTimeMillis();
+    @Timeout(value = 3, unit = ChronoUnit.SECONDS)                  // Reduced from 8s - free worker threads faster on Redis slowdowns
+    public Uni<String> getGroupId(String userId) {
 
-        LoggingUtil.logInfo(log, CLASS_NAME, "getUserData",
-                "Retrieving user data from cache for userId: %s", userId);
+        LoggingUtil.logDebug(log, M_GET, "Retrieving Group id for cache userId: %s", userId);
+        String key = GROUP_KEY_PREFIX + userId;
 
-        String key = KEY_PREFIX + userId;
-
-        return reactiveRedisDataSource.value(String.class)
-                .get(key)
-                .onItem().transform(Unchecked.function(jsonValue -> {
-                    if (jsonValue == null || jsonValue.isEmpty()) {
-                        LoggingUtil.logDebug(log, CLASS_NAME, "getUserData",
-                                "No cache entry found for userId: %s", userId);
-                        return null; // No record found
-                    }
+        // Use cached valueCommands for better performance at high TPS
+        return valueCommands.get(key)
+                .onItem().ifNotNull().transform(Unchecked.function(groupId -> {
                     try {
-                        UserSessionData userSessionData = objectMapper.readValue(jsonValue, UserSessionData.class);
-                        long duration = System.currentTimeMillis() - startTime;
-                        LoggingUtil.logInfo(log, CLASS_NAME, "getUserData",
-                                "Successfully retrieved user data for userId: %s in %d ms",
-                                userId, duration);
-                        return userSessionData;
+
+                        LoggingUtil.logDebug(log, M_GET, "User data retrieved for userId: %s",
+                                userId);
+
+                        return groupId;
                     } catch (Exception e) {
-                        LoggingUtil.logError(log, CLASS_NAME, "getUserData", e,
-                                "Failed to deserialize user data for userId: %s", userId);
+                        LoggingUtil.logError(log, M_GET, "getGroupId", null, "Failed to deserialize user data for userId: %s - %s", userId, e.getMessage());
+                        exceptionMetricsService.recordException(e, ExceptionMetricsService.Layer.CLIENT, ExceptionMetricsService.Source.REDIS);
                         throw new BaseException(
                                 "Failed to deserialize user data",
                                 ResponseCodeEnum.EXCEPTION_CLIENT_LAYER.description(),
                                 Response.Status.INTERNAL_SERVER_ERROR,
                                 ResponseCodeEnum.EXCEPTION_CLIENT_LAYER.code(),
-                                e.getStackTrace()
+                                null
                         );
                     }
                 }))
                 .onFailure().invoke(e -> {
-                    long duration = System.currentTimeMillis() - startTime;
-                    LoggingUtil.logError(log, CLASS_NAME, "getUserData", e,
-                            "Failed to get user data for userId: %s after %d ms",
-                            userId, duration);
+                    LoggingUtil.logError(log, M_GET, "getGroupId",  e, "Failed to get user data for userId: %s", userId);
+                    exceptionMetricsService.recordException(e, ExceptionMetricsService.Layer.CLIENT, ExceptionMetricsService.Source.REDIS);
                 });
     }
 
 
-    public Uni<Void> updateUserAndRelatedCaches(String userId, UserSessionData userData) {
-        long startTime = System.currentTimeMillis();
+    @Retry(
+            maxRetries = 1,
+            delay = 30,
+            maxDuration = 1500
+    )
+    @Timeout(value = 3, unit = ChronoUnit.SECONDS)                  // Reduced from 8s - free worker threads faster on Redis slowdowns
+    public Uni<Void> storeUserData(String userId, UserSessionData userData, String userName) {
 
-        LoggingUtil.logInfo(log, CLASS_NAME, "updateUserAndRelatedCaches",
-                "Updating user data and related caches for userId: %s", userId);
+        LoggingUtil.logDebug(log, M_STORE,"storeUserData", "Storing user data for cache userId: %s", userId);
 
+        String key = KEY_PREFIX + userId;
+
+        return Uni.createFrom().item(userData)
+                .onItem().transformToUni(data -> {
+                    try {
+                        byte[] encoded = sessionCacheCodec.encode(data);
+
+                        // Always store user data
+                        Uni<?> storeUserDataUni = userValueCommands.set(key, encoded);
+
+                        // No group handling required
+                        if (data == null || data.getGroupId() == null
+                                || "1".equalsIgnoreCase(data.getGroupId())) {
+                            return storeUserDataUni.replaceWithVoid();
+                        }
+
+                        String groupKey = GROUP_KEY_PREFIX + userName;
+                        String groupValues = new StringBuilder(32)
+                                .append(data.getGroupId()).append(',')
+                                .append(data.getConcurrency()).append(',')
+                                .append(data.getUserStatus()).append(',')
+                                .append(data.getSessionTimeOut()).toString();
+
+                        // Check cache first
+                        return valueCommands.get(groupKey)
+                                .onItem().transformToUni(existingValue -> {
+                                    if (existingValue == null) {
+                                        // Group cache missing → update it
+                                        return Uni.combine().all().unis(
+                                                valueCommands.set(groupKey, groupValues),
+                                                storeUserDataUni
+                                        ).discardItems();
+                                    }
+
+                                    // Group cache already exists → only store user data
+                                    return storeUserDataUni.replaceWithVoid();
+                                });
+
+                    } catch (Exception e) {
+                        LoggingUtil.logError(log, M_STORE,"storeUserData",  null, "Failed to serialize user data for userId: %s - %s",
+                                userId, e.getMessage());
+                        exceptionMetricsService.recordException(e, ExceptionMetricsService.Layer.CLIENT, ExceptionMetricsService.Source.REDIS);
+
+                        return Uni.createFrom().failure(new BaseException(
+                                "Failed to serialize user data",
+                                ResponseCodeEnum.EXCEPTION_CLIENT_LAYER.description(),
+                                Response.Status.INTERNAL_SERVER_ERROR,
+                                ResponseCodeEnum.EXCEPTION_CLIENT_LAYER.code(),
+                                null
+                        ));
+                    }
+                });
+    }
+
+
+    /**
+     * Retrieve user data from Redis.
+     */
+    @Retry(
+            maxRetries = 1,
+            delay = 100,
+            jitter = 50
+    )
+    @Timeout(value = 3, unit = ChronoUnit.SECONDS)                  // Reduced from 8s - free worker threads faster on Redis slowdowns
+    public Uni<UserSessionData> getUserData(String userId) {
+        final long startTime = log.isDebugEnabled() ? System.currentTimeMillis() : 0;
+        LoggingUtil.logDebug(log, M_GET, "getUserData","Retrieving user data for cache userId: %s", userId);
+        String key = KEY_PREFIX + userId;
+
+        // Use cached userValueCommands for better performance at high TPS
+        return userValueCommands.get(key)
+                .onItem().ifNotNull().transform(Unchecked.function(payload -> {
+                    try {
+                        UserSessionData userData = sessionCacheCodec.decode(payload);
+
+                        LoggingUtil.logDebug(log, M_GET,"getUserData", "User data retrieved for userId: %s in %d ms",
+                                userId, (System.currentTimeMillis() - startTime));
+
+                        return userData;
+                    } catch (Exception e) {
+                        LoggingUtil.logError(log, M_GET,"getUserData", null, "Failed to deserialize user data for userId: %s - %s", userId, e.getMessage());
+                        exceptionMetricsService.recordException(e, ExceptionMetricsService.Layer.CLIENT, ExceptionMetricsService.Source.REDIS);
+                        throw new BaseException(
+                                "Failed to deserialize user data",
+                                ResponseCodeEnum.EXCEPTION_CLIENT_LAYER.description(),
+                                Response.Status.INTERNAL_SERVER_ERROR,
+                                ResponseCodeEnum.EXCEPTION_CLIENT_LAYER.code(),
+                                null
+                        );
+                    }
+                }))
+                .onFailure().invoke(e -> {
+                    LoggingUtil.logError(log, M_GET,"getUserData", e, "Failed to get user data for userId: %s", userId);
+                    exceptionMetricsService.recordException(e, ExceptionMetricsService.Layer.CLIENT, ExceptionMetricsService.Source.REDIS);
+                });
+    }
+
+
+    /**
+     * Update user data and related caches in Redis.
+     */
+    @Retry(
+            maxRetries = 1,
+            delay = 30,                     // Reduced from 50ms - faster retry
+            maxDuration = 1500              // Reduced from 2000ms - fail faster
+    )
+    @Timeout(value = 3, unit = ChronoUnit.SECONDS)                  // Reduced from 8s - free worker threads faster on Redis slowdowns
+    public Uni<Void> updateUserAndRelatedCaches(String userId, UserSessionData userData,String userName) {
+        LoggingUtil.logDebug(log, M_UPDATE,"updateUserAndRelatedCaches", "Updating user data and related caches for userId: %s", userId);
         String userKey = KEY_PREFIX + userId;
 
-        return Uni.createFrom().item(() -> serialize(userData))
-                .onItem().invoke(json ->
-                        LoggingUtil.logDebug(log, CLASS_NAME, "updateUserAndRelatedCaches",
-                                "Serialized data for userId: %s, key: %s", userId, userKey)
-                )
-                .onItem().transformToUni(serializedData ->
-                        reactiveRedisDataSource.value(String.class)
-                                .set(userKey, serializedData, new SetArgs().ex(Duration.ofHours(1000)))
-                )
-                .onItem().invoke(() -> {
-                    long duration = System.currentTimeMillis() - startTime;
-                    LoggingUtil.logInfo(log, CLASS_NAME, "updateUserAndRelatedCaches",
-                            "Cache update complete for userId: %s in %d ms",
-                            userId, duration);
-                })
-                .onFailure().invoke(err -> {
-                    long duration = System.currentTimeMillis() - startTime;
-                    LoggingUtil.logError(log, CLASS_NAME, "updateUserAndRelatedCaches", err,
-                            "Failed to update cache for userId: %s after %d ms",
-                            userId, duration);
-                })
-                .replaceWithVoid();
-    }
-
-    public Uni<String> deleteKey(String key) {
-        LoggingUtil.logInfo(log, CLASS_NAME, "deleteKey",
-                "Attempting to delete cache key: %s", key);
-
-        String userKey = KEY_PREFIX + key;
-        ReactiveKeyCommands<String> keyCommands = reactiveRedisDataSource.key();
-
-        return keyCommands.del(userKey)
-                .map(deleted -> deleted > 0
-                        ? "Key deleted: " + key
-                        : "Key not found: " + key);
-    }
-
-
-
-    private String serialize(UserSessionData data) {
         try {
-            return objectMapper.writeValueAsString(data);
-        } catch (Exception e) {
-            throw new BaseException("Failed to deserialize user data", ResponseCodeEnum.EXCEPTION_CLIENT_LAYER.description(), Response.Status.INTERNAL_SERVER_ERROR,ResponseCodeEnum.EXCEPTION_CLIENT_LAYER.code(), e.getStackTrace());
+            byte[] encoded = sessionCacheCodec.encode(userData);
 
+            // Run group and user SET operations in parallel for zero overhead
+            if(userData != null && userData.getGroupId() != null && !userData.getGroupId().equalsIgnoreCase("1")) {
+                String groupKey = GROUP_KEY_PREFIX + userName;
+                String groupValues = new StringBuilder(32)
+                        .append(userData.getGroupId()).append(',')
+                        .append(userData.getConcurrency()).append(',')
+                        .append(userData.getUserStatus()).append(',')
+                        .append(userData.getSessionTimeOut()).toString();
+
+                // Combine both SET operations in parallel - reduces RTT by executing concurrently
+                return Uni.combine().all().unis(
+                                valueCommands.set(groupKey, groupValues),
+                                userValueCommands.set(userKey, encoded)
+                        ).discardItems()
+                        .onFailure().invoke(err -> LoggingUtil.logError(log, M_UPDATE,"updateUserAndRelatedCaches", err, "Failed to update cache for user %s", userId));
+            }
+
+            // If no groupId, only update user data
+            return userValueCommands.set(userKey, encoded)
+                    .onFailure().invoke(err -> LoggingUtil.logError(log, M_UPDATE,"updateUserAndRelatedCaches", err, "Failed to update cache for user %s", userId))
+                    .replaceWithVoid();
+        } catch (Exception e) {
+            LoggingUtil.logError(log, M_UPDATE, "updateUserAndRelatedCaches",null, "Failed to serialize user data for userId: %s - %s", userId, e.getMessage());
+            exceptionMetricsService.recordException(e, ExceptionMetricsService.Layer.CLIENT, ExceptionMetricsService.Source.REDIS);
+            return Uni.createFrom().failure(new BaseException(
+                    "Failed to serialize user data",
+                    ResponseCodeEnum.EXCEPTION_CLIENT_LAYER.description(),
+                    Response.Status.INTERNAL_SERVER_ERROR,
+                    ResponseCodeEnum.EXCEPTION_CLIENT_LAYER.code(),
+                    null
+            ));
+        }
+    }
+
+
+    /**
+     *  Use cached keyCommands instead of creating new instance
+     */
+    public Uni<String> deleteKey(String key) {
+        String userKey1 = KEY_PREFIX + key;
+        String userKey2 = GROUP_KEY_PREFIX + key;
+
+        return keyCommands.del(userKey1, userKey2)
+                .map(deleted -> deleted > 0
+                        ? "Keys deleted count: " + deleted
+                        : "No keys found");
+    }
+
+    /**
+     *
+     * @param userIds list of user IDs to retrieve
+     * @return Uni with Map of userId -> UserSessionData
+     */
+
+    @Retry(
+            maxRetries = 1,
+            delay = 50,                     // Reduced from 100ms - faster retry
+            maxDuration = 3000
+    )
+    @Timeout(value = 3, unit = ChronoUnit.SECONDS)                  // Reduced from 8s - free worker threads faster on Redis slowdowns
+    public Uni<Map<String, UserSessionData>> getUserDataBatchAsMap(List<String> userIds) {
+        if (userIds == null || userIds.isEmpty()) {
+            return Uni.createFrom().item(Map.of());
+        }
+
+        final int size = userIds.size();
+        LoggingUtil.logDebug(log, M_BATCH, "getUserDataBatchAsMap","Retrieving batch user data as map for %d users using MGET", size);
+
+        // Build keys with prefix - optimized with pre-sized array
+        String[] keys = new String[size];
+        for (int i = 0; i < size; i++) {
+            keys[i] = KEY_PREFIX + userIds.get(i);
+        }
+
+        // Use MGET for single network round trip
+        return userValueCommands.mget(keys)
+                .onItem().transform(resultMap -> {
+
+                    // Pre-size HashMap: capacity = size / 0.75 load factor + 1
+                    Map<String, UserSessionData> userDataMap = HashMap.newHashMap((int) (size / 0.75) + 1);
+                    for (Map.Entry<String, byte[]> entry : resultMap.entrySet()) {
+                        byte[] value = entry.getValue();
+                        if (value != null && value.length > 0) {
+                            try {
+                                // Strip prefix from key to get userId
+                                String userId = entry.getKey().substring(KEY_PREFIX.length());
+                                UserSessionData userData = sessionCacheCodec.decode(value);
+                                userDataMap.put(userId, userData);
+                            } catch (Exception e) {
+                                LoggingUtil.logError(log, M_BATCH,"getUserDataBatchAsMap", null, "Failed to deserialize user data for key %s: %s", entry.getKey(), e.getMessage());
+                                exceptionMetricsService.recordException(e, ExceptionMetricsService.Layer.CLIENT, ExceptionMetricsService.Source.REDIS);
+                            }
+                        }
+                    }
+                    return userDataMap;
+                });
+    }
+
+
+    /**
+     * Expired session retrieval with optimized fault tolerance
+     */
+    @CircuitBreaker(
+            requestVolumeThreshold = 200,  // Increased from 100 for 2000 TPS
+            failureRatio = 0.75,            // Increased from 0.7 - less sensitive
+            delay = 3000,                   // Reduced from 5000 - faster recovery
+            successThreshold = 3            // Increased from 2 - more stable
+    )
+    @Retry(
+            maxRetries = 1,
+            delay = 50,                     // Reduced from 100ms - faster retry
+            maxDuration = 4000
+    )
+    @Timeout(value = 3000)                                          // Reduced from 8s - free worker threads faster on Redis slowdowns
+    public Uni<ExpiredSessionsWithData> getExpiredSessionsWithData(long expiryThresholdMillis, int limit) {
+        final long startTime = log.isDebugEnabled() ? System.currentTimeMillis() : 0;
+        LoggingUtil.logDebug(log, M_BATCH,"getExpiredSessionsWithData", "Retrieving expired sessions with data, threshold: %d, limit: %d",
+                expiryThresholdMillis, limit);
+
+        return sessionExpiryIndex.getExpiredSessions(expiryThresholdMillis, limit)
+                .collect().asList()
+                .onItem().transformToUni(expiredEntries -> {
+                    if (expiredEntries.isEmpty()) {
+                        LoggingUtil.logDebug(log, M_BATCH,"", "No expired sessions found");
+                        return Uni.createFrom().item(
+                                new ExpiredSessionsWithData(expiredEntries, Map.of()));
+                    }
+
+                    // Extract unique user IDs for batch retrieval - optimized with pre-sized set
+                    int entryCount = expiredEntries.size();
+                    java.util.Set<String> uniqueUserIds = HashSet.newHashSet((int) (entryCount / 0.75) + 1);
+                    for (SessionExpiryIndex.SessionExpiryEntry entry : expiredEntries) {
+                        uniqueUserIds.add(entry.userId());
+                    }
+                    List<String> userIds = new java.util.ArrayList<>(uniqueUserIds);
+
+                    LoggingUtil.logDebug(log, M_BATCH,"", "Found %d expired sessions for %d users",
+                            entryCount, userIds.size());
+
+                    // Batch fetch user data using MGET
+                    return getUserDataBatchAsMap(userIds)
+                            .onItem().transform(userDataMap -> {
+                                LoggingUtil.logDebug(log, M_BATCH,"", "Retrieved expired sessions with data in %d ms",
+                                        System.currentTimeMillis() - startTime);
+                                return new ExpiredSessionsWithData(expiredEntries, userDataMap);
+                            });
+                });
+    }
+
+    /**
+     * Result containing expired session entries and their associated user data.
+     *
+     * @param expiredEntries List of expired session entries from the index
+     * @param userDataMap Map of userId to UserSessionData for efficient lookup
+     */
+    public record ExpiredSessionsWithData(
+            List<SessionExpiryIndex.SessionExpiryEntry> expiredEntries,
+            Map<String, UserSessionData> userDataMap) {
+
+        /**
+         * Get the user data for a specific user ID.
+         *
+         * @param userId The user ID to look up
+         * @return The UserSessionData or null if not found
+         */
+        public UserSessionData getUserData(String userId) {
+            return userDataMap.get(userId);
+        }
+
+        /**
+         * Get expired entries grouped by user ID.
+         *
+         * @return Map of userId to list of expired session entries
+         */
+        public Map<String, List<SessionExpiryIndex.SessionExpiryEntry>> getEntriesByUser() {
+            return expiredEntries.stream()
+                    .collect(Collectors.groupingBy(SessionExpiryIndex.SessionExpiryEntry::userId));
+        }
+
+        /**
+         * Get raw members for index cleanup.
+         *
+         * @return List of raw member strings for removal from index
+         */
+        public List<String> getRawMembers() {
+            return expiredEntries.stream()
+                    .map(SessionExpiryIndex.SessionExpiryEntry::rawMember)
+                    .toList();
         }
     }
 

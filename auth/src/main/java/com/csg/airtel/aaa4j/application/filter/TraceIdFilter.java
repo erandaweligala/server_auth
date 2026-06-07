@@ -37,12 +37,14 @@ public class TraceIdFilter implements ContainerRequestFilter, ContainerResponseF
 
 	@Override
 	public void filter(ContainerRequestContext requestContext, ContainerResponseContext responseContext) throws IOException {
-		String traceId = MDC.get(TRACE_ID_MDC_KEY).toString();
+		Object traceIdObj = MDC.get(TRACE_ID_MDC_KEY);
+		String traceId = traceIdObj != null ? traceIdObj.toString() : null;
 		if (traceId != null) {
 			responseContext.getHeaders().putSingle(TRACE_ID_HEADER, traceId);
 		}
 
-		String userName = MDC.get(USER_NAME_MDC_KEY).toString();
+		Object userNameObj = MDC.get(USER_NAME_MDC_KEY);
+		String userName = userNameObj != null ? userNameObj.toString() : null;
 		if (userName != null) {
 			responseContext.getHeaders().putSingle(USER_NAME_HEADER, userName);
 		}

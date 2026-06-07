@@ -1,7 +1,7 @@
 package com.csg.airtel.aaa4j.common.util;
 
 import org.jboss.logging.Logger;
-
+import org.jboss.logging.MDC;
 
 
 /**
@@ -64,7 +64,12 @@ public class LoggingUtil {
      */
     private static String buildMessage(String className, String method, String message, Object... args) {
         String formattedMsg = args.length > 0 ? String.format(message, args) : message;
-        return '[' + method + ']' +
+
+        Object traceId = MDC.get(TRACE_ID);
+        String traceIdStr = (traceId != null) ? traceId.toString() : "no-trace";
+
+        return '[' + traceIdStr + ']' +
+                '[' + method + ']' +
                 formattedMsg;
     }
 

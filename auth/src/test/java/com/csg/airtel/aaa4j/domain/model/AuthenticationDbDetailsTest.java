@@ -15,7 +15,7 @@ class AuthenticationDbDetailsTest {
         Map<String, String> attributes = new HashMap<>();
         attributes.put("key1", "value1");
 
-        BucketDetails newService = new BucketDetails("rule", 1L, "bucketId", 100L, "10-12", null, null, null, 1);
+        BucketDetails newService = new BucketDetails("rule", 1L, "bucketId", 100L, "10-12", null, null, null, 1, null);
         List<BucketDetails> bucketDetailsList = List.of(newService);
 
         AuthenticationDbDetails details = new AuthenticationDbDetails(
@@ -42,7 +42,7 @@ class AuthenticationDbDetailsTest {
         newAttributes.put("key2", "value2");
         details.setAttributes(newAttributes);
 
-        BucketDetails newService = new BucketDetails("rule", 1L, "bucketId", 100L, "10-12", null, null, null, 1);
+        BucketDetails newService = new BucketDetails("rule", 1L, "bucketId", 100L, "10-12", null, null, null, 1, null);
         details.setBucketDetails(List.of(newService));
 
         assertEquals("newuser", details.getUserName());

@@ -5,9 +5,8 @@ import com.csg.airtel.aaa4j.domain.constant.Constants;
 import com.csg.airtel.aaa4j.domain.constant.ResponseCodeEnum;
 import com.csg.airtel.aaa4j.domain.model.VendorAttribute;
 import com.csg.airtel.aaa4j.domain.model.VendorAttributeConfig;
+import com.csg.airtel.aaa4j.domain.service.ExceptionMetricsService;
 import com.csg.airtel.aaa4j.exception.BaseException;
-import com.csg.airtel.aaa4j.metrics.service.RootCauseMetricsService;         // NEW
-import com.csg.airtel.aaa4j.metrics.tracker.RootCauseExceptionTracker;        // NEW
 import io.smallrye.mutiny.Uni;
 import io.vertx.mutiny.sqlclient.Pool;
 import io.vertx.mutiny.sqlclient.Row;
@@ -27,16 +26,13 @@ public class BNGRepository {
     private static final String CLASS_NAME = "BNGRepository";
 
     private final Pool client;
-    private final RootCauseMetricsService exceptionMetrics;    // NEW
-    private final RootCauseExceptionTracker exceptionTracker;  // NEW — request-scoped
+    private final ExceptionMetricsService exceptionMetrics;
 
     @Inject
     public BNGRepository(Pool client,
-                         RootCauseMetricsService exceptionMetrics,
-                         RootCauseExceptionTracker exceptionTracker) {
+                         ExceptionMetricsService exceptionMetrics) {
         this.client = client;
         this.exceptionMetrics = exceptionMetrics;
-        this.exceptionTracker = exceptionTracker;
         LoggingUtil.logInfo(LOG, CLASS_NAME, "constructor", "BNGRepository initialized");
     }
 
@@ -62,7 +58,7 @@ public class BNGRepository {
                     long duration = System.currentTimeMillis() - startTime;
                     LoggingUtil.logError(LOG, CLASS_NAME, "getActiveNasIps", e,
                             "Query failed after %d ms", duration);
-                    exceptionMetrics.record(exceptionTracker, e, CLASS_NAME, "getActiveNasIps");
+                    exceptionMetrics.recordException(e, ExceptionMetricsService.Layer.RESOURCE, ExceptionMetricsService.Source.INTERNAL);
                 })
                 .onFailure().transform(this::mapToDatabaseException);
     }
@@ -98,8 +94,7 @@ public class BNGRepository {
                     long duration = System.currentTimeMillis() - startTime;
                     LoggingUtil.logError(LOG, CLASS_NAME, "getBarredPlanRule", e,
                             "Query failed after %d ms", duration);
-                    // ✅ RECORD ONCE HERE
-                    exceptionMetrics.record(exceptionTracker, e, CLASS_NAME, "getBarredPlanRule");
+                    exceptionMetrics.recordException(e, ExceptionMetricsService.Layer.RESOURCE, ExceptionMetricsService.Source.INTERNAL);
                 })
                 .onFailure().transform(this::mapToDatabaseException);
     }
@@ -144,8 +139,7 @@ public class BNGRepository {
                     long duration = System.currentTimeMillis() - startTime;
                     LoggingUtil.logError(LOG, CLASS_NAME, "getActiveNasWithVendorConfigs", e,
                             "Query failed after %d ms - traceId: %s", duration, traceId);
-                    // ✅ RECORD ONCE HERE
-                    exceptionMetrics.record(exceptionTracker, e, CLASS_NAME, "getActiveNasWithVendorConfigs");
+                    exceptionMetrics.recordException(e, ExceptionMetricsService.Layer.RESOURCE, ExceptionMetricsService.Source.INTERNAL);
                 })
                 .onFailure().transform(this::mapToDatabaseException);
     }
@@ -160,7 +154,7 @@ public class BNGRepository {
         LoggingUtil.logError(LOG, CLASS_NAME, "mapToDatabaseException", e,
                 "Database exception occurred: %s", e.getMessage());
 
-        // ❌ NO exceptionMetrics.record() here — already called in the specific method above
+
         return new BaseException(
                 "Database operation failed: " + e.getMessage(),
                 ResponseCodeEnum.EXCEPTION_DATABASE_LAYER.description(),

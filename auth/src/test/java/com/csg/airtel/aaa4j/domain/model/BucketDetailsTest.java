@@ -8,7 +8,7 @@ class BucketDetailsTest {
 
     @Test
     void testConstructorAndGetters() {
-        BucketDetails bucketDetails = new BucketDetails("rule", 1L, "bucket789", 100L, "10-12", null, null, null, 1);
+        BucketDetails bucketDetails = new BucketDetails("rule", 1L, "bucket789", 100L, "10-12", null, null, null, 1, null);
 
 
         assertEquals("bucket789", bucketDetails.getBucketId());

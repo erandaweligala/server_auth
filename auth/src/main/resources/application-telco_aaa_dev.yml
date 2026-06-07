@@ -41,7 +41,6 @@ quarkus:
       acquisition-timeout: 10s
       idle-timeout: 30s
       max-lifetime: PT30M
-  # Increase event loop timeout for first request
 
   vertx:
     event-loops-pool-size: 2         # 1 core pod → 2 event loops sufficient (Kafka + Redis/HTTP I/O)

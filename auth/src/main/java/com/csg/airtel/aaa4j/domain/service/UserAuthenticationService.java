@@ -14,8 +14,6 @@ import com.csg.airtel.aaa4j.exception.BusinessValidationException;
 import com.csg.airtel.aaa4j.external.repository.UserAuthenticationRepository;
 import com.csg.airtel.aaa4j.external.client.CacheClient;
 import com.csg.airtel.aaa4j.common.util.TtlCache;
-import com.csg.airtel.aaa4j.metrics.service.RootCauseMetricsService;      // NEW
-import com.csg.airtel.aaa4j.metrics.tracker.RootCauseExceptionTracker;     // NEW
 import io.smallrye.mutiny.Uni;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -38,8 +36,7 @@ public class UserAuthenticationService {
     private final UserAuthenticationRepository userAuthenticationRepository;
     private final CacheClient cacheClient;
     private final CacheSchedulerService cacheSchedulerService;
-    private final RootCauseMetricsService exceptionMetrics;    // NEW
-    private final RootCauseExceptionTracker exceptionTracker;  // NEW — @RequestScoped, one per HTTP request
+    private final ExceptionMetricsService exceptionMetrics;
 
     @ConfigProperty(name = "radius.accept.attributes")
     String userAttributes;
@@ -58,21 +55,33 @@ public class UserAuthenticationService {
     private final TtlCache<String, Optional<UserSessionData>> sessionDataCache =
             new TtlCache<>(500_000, 10_000);
 
+    // -------------------------------------------------------------------------
+    // Tracks the reason(s) why buckets were disqualified during selection.
+    // Used to produce specific log messages instead of a generic "no bucket" warning.
+    // -------------------------------------------------------------------------
+    private enum DisqualifyReason {
+        INSUFFICIENT_BALANCE,
+        SERVICE_EXPIRED,
+        BUCKET_EXPIRED,
+        TIME_WINDOW,
+        SERVICE_NOT_STARTED,
+        SERVICE_INACTIVE,
+        CONSUMPTION_LIMIT
+    }
+
     @Inject
     public UserAuthenticationService(UserAuthenticationRepository userAuthenticationRepository,
                                      AuthenticationStrategyFactory authStrategyFactory,
                                      CacheClient cacheClient,
                                      CacheSchedulerService cacheSchedulerService,
                                      CacheUpdateService cacheUpdateService,
-                                     RootCauseMetricsService exceptionMetrics,      // NEW
-                                     RootCauseExceptionTracker exceptionTracker) {  // NEW
+                                     ExceptionMetricsService exceptionMetrics) {
         this.userAuthenticationRepository = userAuthenticationRepository;
         this.authStrategyFactory = authStrategyFactory;
         this.cacheClient = cacheClient;
         this.cacheSchedulerService = cacheSchedulerService;
         this.cacheUpdateService = cacheUpdateService;
         this.exceptionMetrics = exceptionMetrics;
-        this.exceptionTracker = exceptionTracker;
         LoggingUtil.logInfo(LOG, CLASS_NAME, "init", "Service initialized successfully");
     }
 
@@ -94,7 +103,7 @@ public class UserAuthenticationService {
                 .onFailure().invoke(e -> {
                     LoggingUtil.logError(LOG, CLASS_NAME, "userAuthenticate", null,
                             "Authentication failed username=%s", username);
-                    exceptionMetrics.record(exceptionTracker, e, CLASS_NAME, "userAuthenticate");
+                    exceptionMetrics.recordException(e, ExceptionMetricsService.Layer.RESOURCE, ExceptionMetricsService.Source.INTERNAL);
                 })
                 .onFailure().transform(this::mapToBaseException)
                 .onTermination().invoke(this::clearThreadLocalCache);
@@ -134,7 +143,7 @@ public class UserAuthenticationService {
     private Uni<UserDetails> processAuthentication(AuthenticationRequest request,
                                                    AuthenticationDbDetails userFromDb,
                                                    VendorAttributeConfig vendorConfig) {
-        String username = userFromDb.getUserName();
+        String username = request.getUsername();
         LoggingUtil.logDebug(LOG, CLASS_NAME, "processAuthentication",
                 "Processing authentication username=%s", username);
 
@@ -235,7 +244,7 @@ public class UserAuthenticationService {
                                                          AuthenticationDbDetails userFromDb,
                                                          UserDetails userDetails,
                                                          VendorAttributeConfig vendorConfig) {
-        String username = userFromDb.getUserName();
+        String username = request.getUsername();
         if (request.getFramedProtocol() != null && request.getFramedProtocol().equalsIgnoreCase("1")) {
             LoggingUtil.logDebug(LOG, CLASS_NAME, "routeToAuthenticationMethod",
                     "PPPoE authentication initiated for username: %s", username);
@@ -279,10 +288,15 @@ public class UserAuthenticationService {
 
         userDetails.setIsActive(true);
         userDetails.setIsEnoughBalance(true);
-        userDetails.setIsAuthorized(true);
 
         return getHighestPriorityRule(userFromDb.getBucketDetails(), username)
                 .onItem().transform(rule -> {
+                    if (rule == null) {
+                        userDetails.setIsAuthorized(false);
+                        cacheUpdateService.recordAccessRejectRequest();
+                        return userDetails;
+                    }
+                    userDetails.setIsAuthorized(true);
                     userDetails.setVendorId(vendorConfig.getVendorId());
                     userDetails.setVendorAttributes(
                             mapToVendorAttributes(userFromDb.getAttributes(), vendorConfig, rule));
@@ -321,6 +335,12 @@ public class UserAuthenticationService {
                     if (authenticatedUser.getIsAuthorized()) {
                         return getHighestPriorityRule(userFromDb.getBucketDetails(), username)
                                 .onItem().transform(rule -> {
+                                    if (rule == null) {
+                                        authenticatedUser.setIsAuthorized(false);
+                                        cacheUpdateService.recordAccessRejectRequest();
+                                        return authenticatedUser;
+                                    }
+                                    authenticatedUser.setIsAuthorized(true);
                                     authenticatedUser.setVendorId(vendorConfig.getVendorId());
                                     authenticatedUser.setVendorAttributes(
                                             mapToVendorAttributes(userFromDb.getAttributes(), vendorConfig, rule));
@@ -434,9 +454,6 @@ public class UserAuthenticationService {
                         LoggingUtil.logDebug(LOG, CLASS_NAME, "getHighestPriorityRule",
                                 "Highest priority balance selected username=%s bucketId=%s rule=%s",
                                 username, balance.getBucketId(), balance.getRule());
-                    } else {
-                        LoggingUtil.logWarn(LOG, CLASS_NAME, "getHighestPriorityRule",
-                                "No eligible balance found username=%s", username);
                     }
                 })
                 .onItem().transform(balance -> balance != null ? balance.getRule() : null);
@@ -485,6 +502,11 @@ public class UserAuthenticationService {
                 });
     }
 
+    // -------------------------------------------------------------------------
+    // Evaluates each bucket step-by-step and tracks why it was disqualified.
+    // If no bucket is selected, logs a specific warning per disqualify reason
+    // instead of a single generic "no eligible bucket" message.
+    // -------------------------------------------------------------------------
     private BucketDetails selectHighestPriorityBalanceWithoutConsumption(List<BucketDetails> bucketDetailsList,
                                                                          String username,
                                                                          LocalDateTime now,
@@ -496,9 +518,18 @@ public class UserAuthenticationService {
         long highestPriority = Long.MIN_VALUE;
         LocalDateTime highestExpiry = null;
 
+        // Track which disqualification reasons were hit across all buckets
+        Set<DisqualifyReason> disqualifyReasons = EnumSet.noneOf(DisqualifyReason.class);
+
         for (BucketDetails balance : bucketDetailsList) {
             String bucketId = balance.getBucketId();
-            if (!isBucketEligibleWithoutConsumption(balance, now, activeStatus, bucketId)) continue;
+
+            DisqualifyReason reason = evaluateBucketEligibilityWithoutConsumption(balance, now, activeStatus, bucketId);
+            if (reason != null) {
+                disqualifyReasons.add(reason);
+                continue;
+            }
+
             long priority = balance.getPriority();
             LocalDateTime expiry = balance.getServiceExpiry();
             if (shouldSelectBalance(highestPriorityBalance, highestPriority, highestExpiry, priority, expiry)) {
@@ -508,72 +539,41 @@ public class UserAuthenticationService {
             }
         }
 
-        logSelectionResult(username, highestPriorityBalance);
+        logSelectionResult(username, highestPriorityBalance, disqualifyReasons);
         return highestPriorityBalance;
     }
 
-    private boolean isBucketEligibleWithoutConsumption(BucketDetails balance, LocalDateTime now,
-                                                       String activeStatus, String bucketId) {
-        return hasValidBalance(balance, bucketId)
-                && !isExpired(balance, now, bucketId)
-                && isWithinTimeWindow(balance.getTimeWindow(), bucketId)
-                && isServiceActive(balance, now, activeStatus, bucketId);
+    // -------------------------------------------------------------------------
+    // Returns the DisqualifyReason if the bucket fails any check, null if eligible.
+    // Checks are ordered: balance → expiry → time window → service start → service status.
+    // -------------------------------------------------------------------------
+    private DisqualifyReason evaluateBucketEligibilityWithoutConsumption(BucketDetails balance,
+                                                                         LocalDateTime now,
+                                                                         String activeStatus,
+                                                                         String bucketId) {
+        if (!hasValidBalance(balance, bucketId)) {
+            return DisqualifyReason.INSUFFICIENT_BALANCE;
+        }
+        if (isBucketExpired(balance, now, bucketId)) {
+            return DisqualifyReason.BUCKET_EXPIRED;
+        }
+        if (isServiceExpired(balance, now, bucketId)) {
+            return DisqualifyReason.SERVICE_EXPIRED;
+        }
+        if (!isWithinTimeWindow(balance.getTimeWindow(), bucketId)) {
+            return DisqualifyReason.TIME_WINDOW;
+        }
+
+        DisqualifyReason serviceReason = evaluateServiceEligibility(balance, now, activeStatus, bucketId);
+        if (serviceReason != null) {
+            return serviceReason;
+        }
+        return null;
     }
 
-    private boolean hasValidBalance(BucketDetails balance, String bucketId) {
-        if (balance.getIsUnlimited() == 0 && balance.getCurrentBalance() != null && balance.getCurrentBalance() <= 0) {
-            LoggingUtil.logDebug(LOG, CLASS_NAME, "selectHighestPriorityBalanceWithoutConsumption",
-                    "Skipping bucket %s: insufficient balance (%s)", bucketId, balance.getCurrentBalance());
-            return false;
-        }
-        return true;
-    }
-
-    private boolean isExpired(BucketDetails balance, LocalDateTime now, String bucketId) {
-        if (balance.getServiceExpiry().isBefore(now)) {
-            LoggingUtil.logDebug(LOG, CLASS_NAME, "selectHighestPriorityBalanceWithoutConsumption",
-                    "Skipping bucket=%s expired on=%s", bucketId, balance.getServiceExpiry());
-            return true;
-        }
-        return false;
-    }
-
-    private boolean isWithinTimeWindow(String timeWindow, String bucketId) {
-        if (!isWithinTimeWindow(timeWindow)) {
-            LoggingUtil.logDebug(LOG, CLASS_NAME, "selectHighestPriorityBalanceWithoutConsumption",
-                    "Skipping bucket=%s outside time window=%s", bucketId, timeWindow);
-            return false;
-        }
-        return true;
-    }
-
-    private boolean isServiceActive(BucketDetails balance, LocalDateTime now,
-                                    String activeStatus, String bucketId) {
-        LocalDateTime serviceStartDate = balance.getServiceStartDate();
-        if (serviceStartDate.isAfter(now)) {
-            LoggingUtil.logDebug(LOG, CLASS_NAME, "selectHighestPriorityBalanceWithoutConsumption",
-                    "Skipping bucket=%s service not started yet starts=%s", bucketId, serviceStartDate);
-            return false;
-        }
-        if (!activeStatus.equals(balance.getServiceStatus())) {
-            LoggingUtil.logDebug(LOG, CLASS_NAME, "selectHighestPriorityBalanceWithoutConsumption",
-                    "Skipping bucket=%s service status=%s expected=%s",
-                    bucketId, balance.getServiceStatus(), activeStatus);
-            return false;
-        }
-        return true;
-    }
-
-    private void logSelectionResult(String username, BucketDetails selectedBalance) {
-        if (selectedBalance != null) {
-            LoggingUtil.logDebug(LOG, CLASS_NAME, "selectHighestPriorityBalanceWithoutConsumption",
-                    "Selected bucket username=%s bucketId=%s", username, selectedBalance.getBucketId());
-        } else {
-            LoggingUtil.logWarn(LOG, CLASS_NAME, "selectHighestPriorityBalanceWithoutConsumption",
-                    "No eligible bucket found username=%s", username);
-        }
-    }
-
+    // -------------------------------------------------------------------------
+    // Same step-by-step evaluation as above, extended with consumption limit check.
+    // -------------------------------------------------------------------------
     private BucketDetails selectHighestPriorityBalance(List<BucketDetails> bucketDetailsList,
                                                        String username,
                                                        LocalDateTime now,
@@ -586,9 +586,18 @@ public class UserAuthenticationService {
         long highestPriority = Long.MIN_VALUE;
         LocalDateTime highestExpiry = null;
 
+        Set<DisqualifyReason> disqualifyReasons = EnumSet.noneOf(DisqualifyReason.class);
+
         for (BucketDetails balance : bucketDetailsList) {
             String bucketId = balance.getBucketId();
-            if (!isBucketEligibleWithConsumption(balance, now, activeStatus, userSessionData, bucketId)) continue;
+
+            DisqualifyReason reason = evaluateBucketEligibilityWithConsumption(
+                    balance, now, activeStatus, userSessionData, bucketId);
+            if (reason != null) {
+                disqualifyReasons.add(reason);
+                continue;
+            }
+
             long priority = balance.getPriority();
             LocalDateTime expiry = balance.getServiceExpiry();
             if (shouldSelectBalance(highestPriorityBalance, highestPriority, highestExpiry, priority, expiry)) {
@@ -601,26 +610,151 @@ public class UserAuthenticationService {
                 highestExpiry = expiry;
             }
         }
+
+        logSelectionResult(username, highestPriorityBalance, disqualifyReasons);
         return highestPriorityBalance;
     }
 
-    private boolean isBucketEligibleWithConsumption(BucketDetails balance, LocalDateTime now,
-                                                    String activeStatus, UserSessionData userSessionData,
-                                                    String bucketId) {
-        return hasValidBalance(balance, bucketId)
-                && !isExpired(balance, now, bucketId)
-                && isWithinTimeWindow(balance.getTimeWindow(), bucketId)
-                && isWithinConsumptionLimit(userSessionData, bucketId)
-                && isServiceActive(balance, now, activeStatus, bucketId);
+    private DisqualifyReason evaluateBucketEligibilityWithConsumption(BucketDetails balance,
+                                                                      LocalDateTime now,
+                                                                      String activeStatus,
+                                                                      UserSessionData userSessionData,
+                                                                      String bucketId) {
+        if (!hasValidBalance(balance, bucketId)) {
+            return DisqualifyReason.INSUFFICIENT_BALANCE;
+        }
+        if (isBucketExpired(balance, now, bucketId)) {
+            return DisqualifyReason.BUCKET_EXPIRED;
+        }
+        if (isServiceExpired(balance, now, bucketId)) {
+            return DisqualifyReason.SERVICE_EXPIRED;
+        }
+        if (!isWithinTimeWindow(balance.getTimeWindow(), bucketId)) {
+            return DisqualifyReason.TIME_WINDOW;
+        }
+        if (!isWithinConsumptionLimit(userSessionData, bucketId)) {
+            return DisqualifyReason.CONSUMPTION_LIMIT;
+        }
+        DisqualifyReason serviceReason = evaluateServiceEligibility(balance, now, activeStatus, bucketId);
+        if (serviceReason != null) {
+            return serviceReason;
+        }
+        return null;
     }
 
-    private boolean isWithinConsumptionLimit(UserSessionData userSessionData, String bucketId) {
-        if (!isWithinConsumptionLimitForBucket(userSessionData, bucketId)) {
-            LoggingUtil.logDebug(LOG, CLASS_NAME, "isBucketEligibleWithConsumption",
-                    "Skipping bucket %s: consumption limit exceeded", bucketId);
+    // -------------------------------------------------------------------------
+    // Evaluates service start date and service status, returning a specific reason
+    // if either check fails. Extracted to avoid duplication across both paths.
+    // -------------------------------------------------------------------------
+    private DisqualifyReason evaluateServiceEligibility(BucketDetails balance, LocalDateTime now,
+                                                        String activeStatus, String bucketId) {
+        LocalDateTime serviceStartDate = balance.getServiceStartDate();
+        if (serviceStartDate.isAfter(now)) {
+            LoggingUtil.logDebug(LOG, CLASS_NAME, "evaluateServiceEligibility",
+                    "Skipping bucket=%s service not started yet starts=%s", bucketId, serviceStartDate);
+            return DisqualifyReason.SERVICE_NOT_STARTED;
+        }
+        if (!activeStatus.equals(balance.getServiceStatus())) {
+            LoggingUtil.logDebug(LOG, CLASS_NAME, "evaluateServiceEligibility",
+                    "Skipping bucket=%s service status=%s expected=%s",
+                    bucketId, balance.getServiceStatus(), activeStatus);
+            return DisqualifyReason.SERVICE_INACTIVE;
+        }
+        return null;
+    }
+
+    private boolean hasValidBalance(BucketDetails balance, String bucketId) {
+        if (balance.getIsUnlimited() == 0 && balance.getCurrentBalance() != null && balance.getCurrentBalance() <= 0) {
+            LoggingUtil.logDebug(LOG, CLASS_NAME, "hasValidBalance",
+                    "Skipping bucket %s: insufficient balance (%s)", bucketId, balance.getCurrentBalance());
             return false;
         }
         return true;
+    }
+
+    private boolean isServiceExpired(BucketDetails balance, LocalDateTime now, String bucketId) {
+        LocalDateTime expiry = balance.getServiceExpiry();
+        if (expiry == null || expiry.isBefore(now)) {
+            LoggingUtil.logDebug(LOG, CLASS_NAME, "isExpired",
+                    "Skipping bucket=%s expired on=%s", bucketId, expiry);
+            return true;
+        }
+        return false;
+    }
+    private boolean isBucketExpired(BucketDetails balance, LocalDateTime now, String bucketId) {
+        LocalDateTime expiry = balance.getBucketExpiry();
+        if (expiry == null || expiry.isBefore(now)) {
+            LoggingUtil.logDebug(LOG, CLASS_NAME, "isExpired",
+                    "Skipping bucket=%s expired on=%s", bucketId, expiry);
+            return true;
+        }
+        return false;
+    }
+
+    private boolean isWithinTimeWindow(String timeWindow, String bucketId) {
+        if (!isWithinTimeWindow(timeWindow)) {
+            LoggingUtil.logDebug(LOG, CLASS_NAME, "isWithinTimeWindow",
+                    "Skipping bucket=%s outside time window=%s", bucketId, timeWindow);
+            return false;
+        }
+        return true;
+    }
+
+    // -------------------------------------------------------------------------
+    // Logs the final selection outcome. If nothing was selected, emits a specific
+    // warn per disqualification reason so the cause is immediately visible in logs.
+    // -------------------------------------------------------------------------
+    private void logSelectionResult(String username, BucketDetails selectedBalance,
+                                    Set<DisqualifyReason> disqualifyReasons) {
+        if (selectedBalance != null) {
+            LoggingUtil.logDebug(LOG, CLASS_NAME, "logSelectionResult",
+                    "Selected bucket username=%s bucketId=%s expiry=%s",
+                    username, selectedBalance.getBucketId(), selectedBalance.getServiceExpiry());
+            return;
+        }
+
+        if (disqualifyReasons.isEmpty()) {
+            LoggingUtil.logWarn(LOG, CLASS_NAME, "logSelectionResult",
+                    "No eligible bucket found username=%s (no buckets to evaluate)", username);
+            return;
+        }
+
+        // Log a specific warning for each disqualification reason that was encountered
+        if (disqualifyReasons.contains(DisqualifyReason.TIME_WINDOW)) {
+            LoggingUtil.logWarn(LOG, CLASS_NAME, "logSelectionResult",
+                    "No eligible bucket found username=%s: all candidate buckets are outside their configured time window",
+                    username);
+        }
+        if (disqualifyReasons.contains(DisqualifyReason.SERVICE_EXPIRED)) {
+            LoggingUtil.logWarn(LOG, CLASS_NAME, "logSelectionResult",
+                    "No eligible bucket found username=%s: one or more services have passed their expiry date",
+                    username);
+        }
+        if (disqualifyReasons.contains(DisqualifyReason.BUCKET_EXPIRED)) {
+            LoggingUtil.logWarn(LOG, CLASS_NAME, "logSelectionResult",
+                    "No eligible bucket found username=%s: one or more buckets have passed their expiry date",
+                    username);
+        }
+        if (disqualifyReasons.contains(DisqualifyReason.INSUFFICIENT_BALANCE)) {
+            LoggingUtil.logWarn(LOG, CLASS_NAME, "logSelectionResult",
+                    "No eligible bucket found username=%s: one or more buckets have zero or negative balance",
+                    username);
+        }
+        if (disqualifyReasons.contains(DisqualifyReason.CONSUMPTION_LIMIT)) {
+            LoggingUtil.logWarn(LOG, CLASS_NAME, "logSelectionResult",
+                    "No eligible bucket found username=%s: one or more buckets have exceeded their consumption limit",
+                    username);
+        }
+        if (disqualifyReasons.contains(DisqualifyReason.SERVICE_NOT_STARTED)) {
+            LoggingUtil.logWarn(LOG, CLASS_NAME, "logSelectionResult",
+                    "No eligible bucket found username=%s: one or more buckets have a future service start date",
+                    username);
+        }
+        if (disqualifyReasons.contains(DisqualifyReason.SERVICE_INACTIVE)) {
+            LoggingUtil.logWarn(LOG, CLASS_NAME, "logSelectionResult",
+                    "No eligible bucket found username=%s: one or more buckets have an inactive service status",
+                    username);
+        }
     }
 
     private boolean shouldSelectBalance(BucketDetails currentHighest, long currentHighestPriority,
@@ -632,6 +766,15 @@ public class UserAuthenticationService {
             return currentHighestExpiry == null || candidateExpiry.isBefore(currentHighestExpiry);
         }
         return false;
+    }
+
+    private boolean isWithinConsumptionLimit(UserSessionData userSessionData, String bucketId) {
+        if (!isWithinConsumptionLimitForBucket(userSessionData, bucketId)) {
+            LoggingUtil.logDebug(LOG, CLASS_NAME, "isWithinConsumptionLimit",
+                    "Skipping bucket %s: consumption limit exceeded", bucketId);
+            return false;
+        }
+        return true;
     }
 
     private boolean isWithinConsumptionLimitForBucket(UserSessionData userSessionData, String bucketId) {
@@ -710,7 +853,7 @@ public class UserAuthenticationService {
         if (cached == null) {
             String[] times = timeWindow.split("-", 2);
             if (times.length != 2) {
-                LoggingUtil.logError(LOG, CLASS_NAME, "calculateConsumptionInWindow", null,
+                LoggingUtil.logError(LOG, CLASS_NAME, "isWithinTimeWindow", null,
                         "Invalid time window: %s", timeWindow);
                 throw new IllegalArgumentException("Invalid time window format. Expected format: 'HH:mm - HH:mm'");
             }
