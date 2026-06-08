@@ -11,6 +11,7 @@ import com.csg.airtel.aaa4j.exception.BusinessValidationException;
 import com.csg.airtel.aaa4j.metrics.db.TimedDb;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
+import io.smallrye.mutiny.TimeoutException;
 import io.smallrye.mutiny.Uni;
 import io.vertx.mutiny.sqlclient.Pool;
 import io.vertx.mutiny.sqlclient.Row;
@@ -324,6 +325,23 @@ public class UserAuthenticationRepository {
     private Throwable mapToDatabaseException(Throwable e) {
         if (e instanceof BaseException) return e;
         if (e instanceof BusinessValidationException) return e;
+
+        // A reactive query timeout (ifNoItem().after(queryTimeoutMs).fail()) is a
+        // transient, retryable condition - not a hard database failure. Surface it
+        // with its own response code and a SERVICE_UNAVAILABLE status so callers can
+        // distinguish "DB was slow, retry" from "DB query/connection broke" (E1002).
+        if (e instanceof TimeoutException) {
+            LoggingUtil.logWarn(LOG, CLASS_NAME, "mapToDatabaseException",
+                    "Database query timed out after %dms (transient) message=%s",
+                    queryTimeoutMs, e.getMessage());
+            return new BaseException(
+                    "Database query timed out after " + queryTimeoutMs + "ms",
+                    ResponseCodeEnum.EXCEPTION_DATABASE_TIMEOUT.description(),
+                    Response.Status.SERVICE_UNAVAILABLE,
+                    ResponseCodeEnum.EXCEPTION_DATABASE_TIMEOUT.code(),
+                    e.getStackTrace()
+            );
+        }
 
         LoggingUtil.logError(LOG, CLASS_NAME, "mapToDatabaseException", e,
                 "Database exception message=%s", e.getMessage());

@@ -11,6 +11,9 @@ public enum ResponseCodeEnum {
     EXCEPTION_SERVICE_LAYER("E1001", "Exception Service Layer Error"),
     EXCEPTION_DATABASE_LAYER("E1002", "Exception in Database Layer Error"),
     EXCEPTION_CLIENT_LAYER("E1003", "Exception Cache Layer Error"),
+    // Transient: the reactive DB query exceeded its fail-fast timeout. Retryable,
+    // distinct from a hard database-layer failure (E1002).
+    EXCEPTION_DATABASE_TIMEOUT("E1004", "Database query timed out"),
 
     // Authentication errors
     USER_NOT_FOUND("E2001", "User Not Found"),
